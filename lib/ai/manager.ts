@@ -132,7 +132,7 @@ export class AIModelManager {
         name: 'gemini',
         apiKey: geminiKey,
         baseUrl: 'https://generativelanguage.googleapis.com',
-        defaultModel: process.env.GEMINI_DEFAULT_MODEL || 'gemini-2.5-flash-lite',
+        defaultModel: process.env.GEMINI_DEFAULT_MODEL || 'gemini-2.0-flash',
         enabled: true,
         timeout: parseInt(process.env.AI_TIMEOUT || '60000', 10),
         maxRetries: parseInt(process.env.AI_MAX_RETRIES || '3', 10),

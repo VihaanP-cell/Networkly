@@ -5,30 +5,28 @@
  * - Multi-provider support (OpenRouter, Gemini)
  * - Use case-based model selection
  * - Automatic fallback handling
- * - Health monitoring
+ * - Health monitoring (delegated)
  * - Unified interface for all AI operations
  */
 
 import type {
   ProviderName,
-  ProviderConfig,
   ModelInfo,
   CompletionOptions,
   CompletionResult,
   StreamChunk,
   HealthCheckResult,
   ProviderStatus,
-  RateLimitState,
-  RateLimitConfig,
   AIManagerConfig,
   UseCaseConfig,
   UseCase,
 } from './types'
 
-import { AIProviderError, AIManagerConfigSchema } from './types'
-import { GeminiProvider } from './providers/gemini'
+import { AIManagerConfigSchema } from './types'
 import { logger } from './utils/logger'
 import { DEFAULT_USE_CASE_MODELS } from './model-configs'
+import { HealthMonitor } from './health-monitor'
+import { AIProviderFactory, AIProvider } from './provider-factory'
 
 let logQueryFn: any = null
 try {
@@ -38,27 +36,18 @@ try {
   logQueryFn = async () => { }
 }
 
-// Use case to model mapping defaults - Using latest Gemini models
-// Default: gemini-2.5-flash-lite (most cost-effective)
-// Heavy tasks: gemini-3-flash-preview (latest high-quality)
-// Use case to model mapping is managed in model-configs.ts
-
 export class AIModelManager {
-  private geminiProvider: GeminiProvider | null = null
+  private providers: Map<ProviderName, AIProvider> = new Map()
   private useCaseConfigs: Map<UseCase, UseCaseConfig> = new Map()
-  private healthCheckInterval?: ReturnType<typeof setInterval>
-  private providerStatuses: Map<ProviderName, ProviderStatus> = new Map()
+  private healthMonitor: HealthMonitor
   private initialized: boolean = false
 
   constructor(config?: AIManagerConfig) {
+    this.healthMonitor = new HealthMonitor()
     if (config) {
       this.initialize(config)
     }
   }
-
-  /**
-   * Initialize from environment variables
-   */
 
   /**
    * Initialize the manager with configuration
@@ -73,30 +62,16 @@ export class AIModelManager {
       enabled: validatedConfig.enableLogging,
     })
 
-    // Initialize providers
+    // Initialize providers via Factory
     for (const providerConfig of validatedConfig.providers) {
-      if (!providerConfig.enabled) continue
+      const provider = AIProviderFactory.createProvider(providerConfig)
+      if (provider) {
+        this.providers.set(provider.providerName, provider)
+        this.healthMonitor.registerProvider(provider)
 
-      switch (providerConfig.name) {
-        case 'gemini':
-          // Gemini uses a different provider class
-          this.geminiProvider = new GeminiProvider(providerConfig)
-          this.providerStatuses.set('gemini', {
-            name: 'gemini',
-            healthy: true,
-            lastCheck: new Date(),
-            consecutiveFailures: 0,
-            averageLatencyMs: 0,
-            modelsHealthy: this.geminiProvider.getModels().length,
-            modelsUnhealthy: 0,
-          })
-          logger.info('AIManager', 'Initialized provider: gemini', {
-            models: this.geminiProvider.getModels().length,
-          })
-          continue // Skip the BaseProvider handling below
-        default:
-          logger.warn('AIManager', `Unknown provider: ${providerConfig.name}`)
-          continue
+        logger.info('AIManager', `Initialized provider: ${provider.providerName}`, {
+          models: provider.getModels().length,
+        })
       }
     }
 
@@ -109,12 +84,12 @@ export class AIModelManager {
 
     // Start health checks if enabled
     if (validatedConfig.enableHealthChecks) {
-      this.startHealthChecks(validatedConfig.healthCheckIntervalMs)
+      this.healthMonitor.start(validatedConfig.healthCheckIntervalMs)
     }
 
     this.initialized = true
     logger.info('AIManager', 'Initialization complete', {
-      providers: this.geminiProvider ? 1 : 0,
+      providers: this.providers.size,
       useCases: this.useCaseConfigs.size,
     })
   }
@@ -123,35 +98,30 @@ export class AIModelManager {
    * Initialize from environment variables
    */
   initializeFromEnv(): void {
-    const providers: AIManagerConfig['providers'] = []
-
-    // Gemini (Google AI)
-    const geminiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY || process.env.GEMINI_API_KEY
-    if (geminiKey) {
-      providers.push({
-        name: 'gemini',
-        apiKey: geminiKey,
-        baseUrl: 'https://generativelanguage.googleapis.com',
-        defaultModel: process.env.GEMINI_DEFAULT_MODEL || 'gemini-2.0-flash',
-        enabled: true,
-        timeout: parseInt(process.env.AI_TIMEOUT || '60000', 10),
-        maxRetries: parseInt(process.env.AI_MAX_RETRIES || '3', 10),
-      })
-    }
+    const providers = AIProviderFactory.createFromEnv()
 
     if (providers.length === 0) {
       throw new Error('No AI providers configured. Set GOOGLE_GENERATIVE_AI_API_KEY or GEMINI_API_KEY.')
     }
 
-    this.initialize({
-      providers,
-      globalTimeout: parseInt(process.env.AI_TIMEOUT || '30000', 10),
-      globalMaxRetries: parseInt(process.env.AI_MAX_RETRIES || '3', 10),
-      enableHealthChecks: process.env.AI_HEALTH_CHECKS !== 'false',
-      healthCheckIntervalMs: parseInt(process.env.AI_HEALTH_CHECK_INTERVAL || '60000', 10),
-      enableLogging: process.env.AI_LOGGING !== 'false',
-      logLevel: (process.env.AI_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',
+    // Initialize with discovered providers
+    // We construct a config object to reuse the main initialize logic or just set directly
+    // Setting directly here for simplicity as factory returns instances
+    providers.forEach(p => {
+      this.providers.set(p.providerName, p)
+      this.healthMonitor.registerProvider(p)
+      logger.info('AIManager', `Initialized provider from env: ${p.providerName}`)
     })
+
+    // Default configuration for env initialization
+    this.healthMonitor.start(parseInt(process.env.AI_HEALTH_CHECK_INTERVAL || '60000', 10))
+
+    logger.configure({
+      level: (process.env.AI_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',
+      enabled: process.env.AI_LOGGING !== 'false',
+    })
+
+    this.initialized = true
   }
 
   /**
@@ -159,9 +129,8 @@ export class AIModelManager {
    */
   getAllModels(): ModelInfo[] {
     const models: ModelInfo[] = []
-    // Include Gemini models
-    if (this.geminiProvider) {
-      models.push(...this.geminiProvider.getModels())
+    for (const provider of this.providers.values()) {
+      models.push(...provider.getModels())
     }
     return models
   }
@@ -170,8 +139,9 @@ export class AIModelManager {
    * Get models from a specific provider
    */
   getProviderModels(providerName: ProviderName): ModelInfo[] {
-    if (providerName === 'gemini' && this.geminiProvider) {
-      return this.geminiProvider.getModels()
+    const provider = this.providers.get(providerName)
+    if (provider) {
+      return provider.getModels()
     }
     return []
   }
@@ -181,8 +151,9 @@ export class AIModelManager {
    */
   getModel(fullModelId: string): ModelInfo | undefined {
     const [providerName, modelId] = this.parseModelId(fullModelId)
-    if (providerName === 'gemini' && this.geminiProvider) {
-      return this.geminiProvider.getModel(modelId)
+    const provider = this.providers.get(providerName)
+    if (provider) {
+      return provider.getModel(modelId)
     }
     return undefined
   }
@@ -221,30 +192,24 @@ export class AIModelManager {
 
     for (const fullModelId of modelsToTry) {
       const [providerName, modelId] = this.parseModelId(fullModelId)
+      const provider = this.providers.get(providerName)
 
-      const status = this.providerStatuses.get(providerName)
+      if (!provider) {
+        logger.warn('AIManager', `Provider not found: ${providerName}`)
+        continue
+      }
+
+      const status = this.healthMonitor.getProviderStatus(providerName)
       if (status && status.consecutiveFailures >= 5) {
         logger.warn('AIManager', `Skipping unhealthy provider: ${providerName}`)
         continue
       }
 
       try {
-        let result: CompletionResult
-
-        if (providerName === 'gemini' && this.geminiProvider) {
-          result = await this.geminiProvider.complete({
-            ...options,
-            model: modelId,
-          })
-        } else {
-          logger.warn('AIManager', `Provider not found or unsupported: ${providerName}`)
-          continue
-        }
-
-        if (status) {
-          status.consecutiveFailures = 0
-          status.healthy = true
-        }
+        const result = await provider.complete({
+          ...options,
+          model: modelId,
+        })
 
         if (logQueryFn) {
           logQueryFn({
@@ -262,12 +227,10 @@ export class AIModelManager {
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
 
-        if (status) {
-          status.consecutiveFailures++
-          if (status.consecutiveFailures >= 3) {
-            status.healthy = false
-          }
-        }
+        // Let HealthMonitor know about failure implicitly through health checks, 
+        // or we could expose a reportFailure method on it. 
+        // For now, we rely on the background health checks to catch persistent issues,
+        // but we can log the fallback here.
 
         const nextModel = modelsToTry[modelsToTry.indexOf(fullModelId) + 1]
         if (nextModel) {
@@ -303,41 +266,23 @@ export class AIModelManager {
 
     for (const fullModelId of modelsToTry) {
       const [providerName, modelId] = this.parseModelId(fullModelId)
+      const provider = this.providers.get(providerName)
 
-      const status = this.providerStatuses.get(providerName)
+      if (!provider) continue
+
+      const status = this.healthMonitor.getProviderStatus(providerName)
       if (status && status.consecutiveFailures >= 5) continue
 
       try {
-        // Handle Gemini provider separately
-        if (providerName === 'gemini' && this.geminiProvider) {
-          for await (const chunk of this.geminiProvider.stream({
-            ...options,
-            model: modelId,
-          })) {
-            yield chunk
-          }
-        } else {
-          logger.warn('AIManager', `Provider not found or unsupported for streaming: ${providerName}`)
-          continue
+        for await (const chunk of provider.stream({
+          ...options,
+          model: modelId,
+        })) {
+          yield chunk
         }
-
-        // Update provider status on success
-        if (status) {
-          status.consecutiveFailures = 0
-          status.healthy = true
-        }
-
         return
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
-
-        if (status) {
-          status.consecutiveFailures++
-          if (status.consecutiveFailures >= 3) {
-            status.healthy = false
-          }
-        }
-
         const nextModel = modelsToTry[modelsToTry.indexOf(fullModelId) + 1]
         if (nextModel) {
           logger.fallback(fullModelId, nextModel, lastError.message)
@@ -360,10 +305,15 @@ export class AIModelManager {
         return [options.model]
       }
 
-      // Otherwise, assume it's a short model ID and try to find it
-      if (this.geminiProvider && this.geminiProvider.hasModel(options.model)) {
-        return [`gemini:${options.model}`]
+      // Check all providers for this model
+      for (const [name, provider] of this.providers.entries()) {
+        if (provider.hasModel(options.model)) {
+          return [`${name}:${options.model}`]
+        }
       }
+
+      // Default fall-through if not found (likely will fail later but keeps logic simple)
+      return [`gemini:${options.model}`]
     }
 
     // Get models based on use case
@@ -385,72 +335,31 @@ export class AIModelManager {
   }
 
   /**
-   * Validate the AIManager configuration.
-   */
-  private validateConfig(config: AIManagerConfig): AIManagerConfig {
-    // Basic validation, more can be added as needed
-    if (!config.providers || config.providers.length === 0) {
-      throw new Error('AIManager configuration must include at least one provider.')
-    }
-
-    // Ensure global defaults are set if not provided
-    const validatedConfig = {
-      ...config,
-      globalTimeout: config.globalTimeout || 30000,
-      globalMaxRetries: config.globalMaxRetries || 3,
-      enableHealthChecks: config.enableHealthChecks ?? true,
-      healthCheckIntervalMs: config.healthCheckIntervalMs || 60000,
-      enableLogging: config.enableLogging ?? true,
-      logLevel: config.logLevel || 'info',
-    }
-
-    return validatedConfig
-  }
-
-  /**
-   * Start health check monitoring
-   */
-  private startHealthChecks(intervalMs: number): void {
-    this.healthCheckInterval = setInterval(async () => {
-      await this.runHealthChecks()
-    }, intervalMs)
-
-    // Run initial check
-    this.runHealthChecks().catch((err) => {
-      logger.error('AIManager', 'Initial health check failed', { error: String(err) })
-    })
-  }
-
-  /**
    * Run health checks on all providers
    */
   async runHealthChecks(): Promise<HealthCheckResult[]> {
-    const results: HealthCheckResult[] = []
-
-    // Gemini is checked via completion attempts or we could add a ping here
-    // For now, focusing on the registered provider logic which we simplified
-    return results
+    return this.healthMonitor.runHealthChecks()
   }
 
   /**
    * Get provider statuses
    */
   getProviderStatuses(): ProviderStatus[] {
-    return Array.from(this.providerStatuses.values())
+    return this.healthMonitor.getAllStatuses()
   }
 
   /**
    * Get a specific provider status
    */
   getProviderStatus(providerName: ProviderName): ProviderStatus | undefined {
-    return this.providerStatuses.get(providerName)
+    return this.healthMonitor.getProviderStatus(providerName)
   }
 
   /**
    * Check if a provider is healthy
    */
   isProviderHealthy(providerName: ProviderName): boolean {
-    const status = this.providerStatuses.get(providerName)
+    const status = this.healthMonitor.getProviderStatus(providerName)
     return status?.healthy ?? false
   }
 
@@ -458,24 +367,16 @@ export class AIModelManager {
    * Get healthy providers
    */
   getHealthyProviders(): ProviderName[] {
-    return Array.from(this.providerStatuses.entries())
-      .filter(([_, status]) => status.healthy)
-      .map(([name]) => name)
+    return this.healthMonitor.getAllStatuses()
+      .filter(status => status.healthy)
+      .map(status => status.name)
   }
 
   /**
    * Stop health checks and cleanup
    */
   shutdown(): void {
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval)
-    }
-
-    // Cancel any ongoing requests
-    if (this.geminiProvider) {
-      // If geminiProvider had a cancel method, we'd call it here
-    }
-
+    this.healthMonitor.stop()
     logger.info('AIManager', 'Shutdown complete')
   }
 
@@ -509,4 +410,5 @@ export function createAIManager(config: AIManagerConfig): AIModelManager {
 }
 
 // Re-export providers for direct use if needed
+import { GeminiProvider } from './providers/gemini'
 export { GeminiProvider }

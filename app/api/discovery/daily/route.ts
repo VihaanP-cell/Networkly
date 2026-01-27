@@ -102,7 +102,7 @@ export async function POST(req: NextRequest) {
             let stdout = ""
             let stderr = ""
             
-            const pythonProcess = spawn("python", args, {
+            const pythonProcess = spawn("python3", args, {
                 cwd: scraperPath,
                 env: {
                     ...process.env,

@@ -64,7 +64,7 @@ export async function triggerDiscovery(
         const mainEnv = loadEnvFromFile(path.join(process.cwd(), ".env"));
 
         // Run the discovery script
-        const pythonProcess = spawn("python", [scriptPath, sanitizedQuery], {
+        const pythonProcess = spawn("python3", [scriptPath, sanitizedQuery], {
             cwd: scraperPath,
             env: {
                 ...process.env,
@@ -185,7 +185,7 @@ export async function triggerBatchDiscovery(
 
         args.push("--limit", limit.toString());
 
-        const pythonProcess = spawn("python", args, {
+        const pythonProcess = spawn("python3", args, {
             cwd: scraperPath,
             env: {
                 ...process.env,
@@ -270,7 +270,7 @@ stats = cache.get_stats()
 print(json.dumps(stats))
 `;
 
-        const pythonProcess = spawn("python", ["-c", pythonScript], {
+        const pythonProcess = spawn("python3", ["-c", pythonScript], {
             cwd: scraperPath,
         });
 
@@ -318,7 +318,7 @@ deleted = cache.clear_old_entries(${days})
 print(json.dumps({"deleted": deleted}))
 `;
 
-        const pythonProcess = spawn("python", ["-c", pythonScript], {
+        const pythonProcess = spawn("python3", ["-c", pythonScript], {
             cwd: scraperPath,
         });
 

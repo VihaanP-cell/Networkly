@@ -22,7 +22,7 @@ import batch_discovery
 from batch_discovery import BatchDiscovery
 
 
-async def run_bootstrap(category: str | None, limit: int, quiet: bool, profile: str) -> None:
+async def run_bootstrap(category: Optional[str], limit: int, quiet: bool, profile: str) -> None:
     """Run a curated-only bootstrap discovery."""
     db_url = os.getenv("DATABASE_URL")
     if db_url:

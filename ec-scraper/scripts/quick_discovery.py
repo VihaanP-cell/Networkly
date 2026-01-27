@@ -551,7 +551,7 @@ async def main(
             "error": error,
         })
     
-    async def extract_and_save(crawl_result) -> dict | None:
+    async def extract_and_save(crawl_result) -> Optional[dict]:
         """Extract from page - supports both single and list-page extraction."""
         nonlocal first_ec_time
         if not crawl_result.success:

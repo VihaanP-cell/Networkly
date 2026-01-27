@@ -84,99 +84,99 @@ export async function POST(req: NextRequest) {
         const mainEnv = loadEnvFromFile(path.join(process.cwd(), ".env"))
 
         // Build command arguments
-        const args = ["python", scriptPath]
-        
+        const args = ["python3", scriptPath]
+
         // Add source selection
         if (selectedSources.length === 1 && selectedSources[0] !== "all") {
             args.push("--source", selectedSources[0])
         }
-        
+
         // Add focus areas
         if (focusAreas.length > 0) {
             args.push("--focus", ...focusAreas)
         }
-        
+
         // Add limit
         args.push("--limit", limit.toString())
 
-        // Spawn the process asynchronously
-        ;(async () => {
-            const pythonProcess = spawn(args[0], args.slice(1), {
-                cwd: scraperPath,
-                env: {
-                    ...process.env,
-                    ...mainEnv,
-                    ...scraperEnv,
-                    DATABASE_URL: process.env.DATABASE_URL || mainEnv.DATABASE_URL,
-                    GOOGLE_API_KEY: scraperEnv.GOOGLE_API_KEY || process.env.GOOGLE_API_KEY,
-                },
-            })
+            // Spawn the process asynchronously
+            ; (async () => {
+                const pythonProcess = spawn(args[0], args.slice(1), {
+                    cwd: scraperPath,
+                    env: {
+                        ...process.env,
+                        ...mainEnv,
+                        ...scraperEnv,
+                        DATABASE_URL: process.env.DATABASE_URL || mainEnv.DATABASE_URL,
+                        GOOGLE_API_KEY: scraperEnv.GOOGLE_API_KEY || process.env.GOOGLE_API_KEY,
+                    },
+                })
 
-            pythonProcess.stdout.on("data", async (data) => {
-                const text = data.toString()
-                console.log("[BatchDiscovery]", text)
+                pythonProcess.stdout.on("data", async (data) => {
+                    const text = data.toString()
+                    console.log("[BatchDiscovery]", text)
 
-                // Parse progress and send as SSE
-                const lines = text.split("\n")
-                for (const line of lines) {
-                    if (!line.trim()) continue
+                    // Parse progress and send as SSE
+                    const lines = text.split("\n")
+                    for (const line of lines) {
+                        if (!line.trim()) continue
 
-                    // Extract status from log messages
-                    let eventData: any = { type: "log", message: line }
+                        // Extract status from log messages
+                        let eventData: any = { type: "log", message: line }
 
-                    if (line.includes("📚 Discovering from curated")) {
-                        eventData = { type: "status", phase: "curated", message: "Checking curated sources..." }
-                    } else if (line.includes("🗺️  Discovering from sitemaps")) {
-                        eventData = { type: "status", phase: "sitemaps", message: "Crawling sitemaps..." }
-                    } else if (line.includes("📡 Discovering from RSS")) {
-                        eventData = { type: "status", phase: "rss", message: "Monitoring RSS feeds..." }
-                    } else if (line.includes("🔍 Discovering from AI search")) {
-                        eventData = { type: "status", phase: "search", message: "AI-powered search..." }
-                    } else if (line.includes("🔄 Getting recheck queue")) {
-                        eventData = { type: "status", phase: "recheck", message: "Processing recheck queue..." }
-                    } else if (line.includes("⚙️  Processing")) {
-                        const match = line.match(/Processing (\d+) URLs/)
-                        if (match) {
-                            eventData = { type: "processing", count: parseInt(match[1]) }
+                        if (line.includes("📚 Discovering from curated")) {
+                            eventData = { type: "status", phase: "curated", message: "Checking curated sources..." }
+                        } else if (line.includes("🗺️  Discovering from sitemaps")) {
+                            eventData = { type: "status", phase: "sitemaps", message: "Crawling sitemaps..." }
+                        } else if (line.includes("📡 Discovering from RSS")) {
+                            eventData = { type: "status", phase: "rss", message: "Monitoring RSS feeds..." }
+                        } else if (line.includes("🔍 Discovering from AI search")) {
+                            eventData = { type: "status", phase: "search", message: "AI-powered search..." }
+                        } else if (line.includes("🔄 Getting recheck queue")) {
+                            eventData = { type: "status", phase: "recheck", message: "Processing recheck queue..." }
+                        } else if (line.includes("⚙️  Processing")) {
+                            const match = line.match(/Processing (\d+) URLs/)
+                            if (match) {
+                                eventData = { type: "processing", count: parseInt(match[1]) }
+                            }
+                        } else if (line.includes("✅") && line.includes("successful")) {
+                            const match = line.match(/✅ (\d+) successful/)
+                            if (match) {
+                                eventData = { type: "success", count: parseInt(match[1]) }
+                            }
+                        } else if (line.includes("📈 FINAL STATISTICS")) {
+                            eventData = { type: "status", phase: "complete", message: "Discovery complete!" }
                         }
-                    } else if (line.includes("✅") && line.includes("successful")) {
-                        const match = line.match(/✅ (\d+) successful/)
-                        if (match) {
-                            eventData = { type: "success", count: parseInt(match[1]) }
-                        }
-                    } else if (line.includes("📈 FINAL STATISTICS")) {
-                        eventData = { type: "status", phase: "complete", message: "Discovery complete!" }
+
+                        await safeWrite(`data: ${JSON.stringify(eventData)}\n\n`)
                     }
+                })
 
-                    await safeWrite(`data: ${JSON.stringify(eventData)}\n\n`)
-                }
-            })
+                pythonProcess.stderr.on("data", async (data) => {
+                    const text = data.toString()
+                    console.error("[BatchDiscovery Error]", text)
+                    await safeWrite(`data: ${JSON.stringify({ type: "error", message: text })}\n\n`)
+                })
 
-            pythonProcess.stderr.on("data", async (data) => {
-                const text = data.toString()
-                console.error("[BatchDiscovery Error]", text)
-                await safeWrite(`data: ${JSON.stringify({ type: "error", message: text })}\n\n`)
-            })
+                pythonProcess.on("close", async (code) => {
+                    const finalMessage = code === 0
+                        ? "Batch discovery completed successfully!"
+                        : "Batch discovery encountered errors."
 
-            pythonProcess.on("close", async (code) => {
-                const finalMessage = code === 0
-                    ? "Batch discovery completed successfully!"
-                    : "Batch discovery encountered errors."
+                    await safeWrite(
+                        `data: ${JSON.stringify({ type: "complete", success: code === 0, message: finalMessage })}\n\n`
+                    )
+                    await safeClose()
+                })
 
-                await safeWrite(
-                    `data: ${JSON.stringify({ type: "complete", success: code === 0, message: finalMessage })}\n\n`
-                )
-                await safeClose()
-            })
-
-            pythonProcess.on("error", async (error) => {
-                console.error("[BatchDiscovery Process Error]", error)
-                await safeWrite(
-                    `data: ${JSON.stringify({ type: "error", message: error.message })}\n\n`
-                )
-                await safeClose()
-            })
-        })()
+                pythonProcess.on("error", async (error) => {
+                    console.error("[BatchDiscovery Process Error]", error)
+                    await safeWrite(
+                        `data: ${JSON.stringify({ type: "error", message: error.message })}\n\n`
+                    )
+                    await safeClose()
+                })
+            })()
 
         return new Response(stream.readable, {
             headers: {

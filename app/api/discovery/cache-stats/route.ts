@@ -23,7 +23,7 @@ print(json.dumps(stats))
 `
 
         return new Promise<NextResponse>((resolve) => {
-            const pythonProcess = spawn("python", ["-c", pythonScript], {
+            const pythonProcess = spawn("python3", ["-c", pythonScript], {
                 cwd: scraperPath,
             })
 

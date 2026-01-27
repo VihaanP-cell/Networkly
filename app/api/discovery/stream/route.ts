@@ -121,7 +121,7 @@ export async function GET(req: NextRequest) {
 
     // Spawn Python process
     // -u forces unbuffered output so we get events immediately
-    const pythonProcess = spawn("python", pythonArgs, {
+    const pythonProcess = spawn("python3", pythonArgs, {
         cwd: scraperPath,
         env: {
             ...process.env,
